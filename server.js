@@ -1,8 +1,6 @@
 // server.js
 // Full server with changes to persist email + answers from TCM quiz into SQLite.
-// - Provides existing endpoints (GET /api/quiz, POST /api/quiz/submit)
-// - Provides TCM endpoints (GET /api/tcm/quiz, POST /api/tcm/quiz/submit)
-// - Creates tcm_submissions table to store email, answers JSON, body_type, created_at
+// Also adds appointment endpoints to create & fetch an appointment and return a generated appointment letter.
 
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
@@ -44,13 +42,30 @@ tcmDb.serialize(() => {
     }
   );
 
-  // Optional: ensure tcm_results table exists structure (no-op if already present)
-  // You can remove or adjust this depending on your schema
-  // tcmDb.run(`CREATE TABLE IF NOT EXISTS tcm_results (...);`);
+  // Create appointments table for appointment flow
+  tcmDb.run(
+    `CREATE TABLE IF NOT EXISTS tcm_appointments (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       name TEXT NOT NULL,
+       email TEXT NOT NULL,
+       phone TEXT,
+       start_datetime TEXT NOT NULL,  -- ISO string
+       duration_minutes INTEGER NOT NULL,
+       notes TEXT,
+       created_at TEXT NOT NULL
+     );`,
+    (err) => {
+      if (err) {
+        console.error('Failed to create tcm_appointments table:', err.message);
+      } else {
+        console.log('tcm_appointments table ready');
+      }
+    }
+  );
 });
 
 // ---------------------------
-// Existing quiz routes
+// Existing quiz routes (unchanged)
 // ---------------------------
 
 // 1. Get 10 random questions (legacy)
@@ -110,13 +125,11 @@ app.post('/api/quiz/submit', (req, res) => {
 });
 
 // ---------------------------
-// TCM Quiz API endpoints
+// TCM Quiz API endpoints (unchanged)
 // ---------------------------
 
 // Get all TCM questions with options
 app.get('/api/tcm/quiz', (req, res) => {
-  // This query assembles options as a JSON array per question using json_group_array/json_object.
-  // Ensure your SQLite build supports JSON1 extension. If not, adapt to a two-query approach.
   const query = `
     SELECT 
       q.id,
@@ -149,11 +162,9 @@ app.get('/api/tcm/quiz', (req, res) => {
       try {
         opts = row.options ? JSON.parse(row.options) : [];
       } catch (e) {
-        // if parsing fails, fallback to empty array
         console.warn('Failed to parse options JSON for question', row.id);
         opts = [];
       }
-      // filter out null id placeholders if any
       opts = opts.filter(opt => opt && opt.id !== null);
       return {
         id: row.id,
@@ -173,20 +184,17 @@ app.post('/api/tcm/quiz/submit', (req, res) => {
   try {
     const { answers, email } = req.body;
 
-    // Basic validation
     if (!Array.isArray(answers) || answers.length === 0) {
       return res.status(400).json({ error: "answers (non-empty array) required" });
     }
     if (!email || typeof email !== "string") {
       return res.status(400).json({ error: "email is required" });
     }
-    // Simple email validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ error: "invalid email format" });
     }
 
-    // Count body type occurrences
     const bodyTypeCounts = {};
     answers.forEach(answer => {
       if (answer && answer.body_type) {
@@ -194,14 +202,12 @@ app.post('/api/tcm/quiz/submit', (req, res) => {
       }
     });
 
-    // Determine dominant type, fallback to 'unsure'
     const dominantBodyType = Object.keys(bodyTypeCounts).length
       ? Object.keys(bodyTypeCounts).reduce((a, b) =>
           bodyTypeCounts[a] > bodyTypeCounts[b] ? a : b
         )
       : "unsure";
 
-    // Query result details for the dominant type
     tcmDb.get(
       "SELECT * FROM tcm_results WHERE body_type = ?",
       [dominantBodyType],
@@ -211,17 +217,13 @@ app.post('/api/tcm/quiz/submit', (req, res) => {
           return res.status(500).json({ error: err.message });
         }
 
-        // Normalize/parse fields which might be stored as JSON strings or CSV
         const parseMaybeJson = (val) => {
           if (!val && val !== "") return [];
           if (Array.isArray(val)) return val;
           try {
             const parsed = JSON.parse(val);
             if (Array.isArray(parsed)) return parsed;
-          } catch (e) {
-            // not JSON
-          }
-          // fallback: split by comma and trim, ignore empty
+          } catch (e) {}
           return String(val).split(',').map(s => s.trim()).filter(Boolean);
         };
 
@@ -236,7 +238,6 @@ app.post('/api/tcm/quiz/submit', (req, res) => {
           body_type_counts: bodyTypeCounts
         };
 
-        // Save submission in tcm_submissions table (store answers as JSON)
         const answersJson = JSON.stringify(answers);
         const createdAt = new Date().toISOString();
         const insertSql = `INSERT INTO tcm_submissions (email, answers_json, body_type, created_at) VALUES (?, ?, ?, ?)`;
@@ -244,17 +245,14 @@ app.post('/api/tcm/quiz/submit', (req, res) => {
         tcmDb.run(insertSql, [email, answersJson, dominantBodyType, createdAt], function(insertErr) {
           if (insertErr) {
             console.error('Failed to insert submission:', insertErr.message);
-            // Return computed result but indicate not saved
             resultPayload.saved = false;
             resultPayload.savedEmail = null;
             return res.status(500).json({ error: "Failed to save submission" });
           }
 
-          // success: include savedEmail and submission id
           resultPayload.saved = true;
           resultPayload.savedEmail = email;
-          resultPayload.submissionId = this.lastID; // last inserted row id
-
+          resultPayload.submissionId = this.lastID;
           return res.json(resultPayload);
         });
       }
@@ -266,6 +264,177 @@ app.post('/api/tcm/quiz/submit', (req, res) => {
 });
 
 // ---------------------------
+// Appointment endpoints (NEW)
+// ---------------------------
+
+// POST /api/appointment/create
+// body: { name, email, phone, startDatetime (ISO string), durationMinutes (int), notes }
+app.post('/api/appointment/create', (req, res) => {
+  try {
+    const { name, email, phone, startDatetime, durationMinutes, notes } = req.body;
+
+    if (!name || !email || !startDatetime || !durationMinutes) {
+      return res.status(400).json({ error: "name, email, startDatetime, durationMinutes required" });
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: "invalid email format" });
+    }
+
+    const createdAt = new Date().toISOString();
+    const insertSql = `INSERT INTO tcm_appointments (name, email, phone, start_datetime, duration_minutes, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+
+    tcmDb.run(insertSql, [name, email, phone || '', startDatetime, durationMinutes, notes || '', createdAt], function(err) {
+      if (err) {
+        console.error('Failed to insert appointment:', err.message);
+        return res.status(500).json({ error: 'Failed to save appointment' });
+      }
+
+      const appointmentId = this.lastID;
+      // Build simple appointment object
+      const appointment = {
+        id: appointmentId,
+        name, email, phone: phone || '', startDatetime, durationMinutes, notes: notes || '', createdAt
+      };
+
+      // Generate an appointment letter (HTML snippet)
+      const letterHtml = generateAppointmentLetterHtml(appointment);
+
+      return res.json({ success: true, appointmentId, appointment, letterHtml });
+    });
+  } catch (ex) {
+    console.error('Unhandled error in /api/appointment/create:', ex);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/appointment/:id - returns JSON appointment
+app.get('/api/appointment/:id', (req, res) => {
+  const id = req.params.id;
+  tcmDb.get("SELECT * FROM tcm_appointments WHERE id = ?", [id], (err, row) => {
+    if (err) {
+      console.error('Error fetching appointment:', err.message);
+      return res.status(500).json({ error: err.message });
+    }
+    if (!row) return res.status(404).json({ error: "not found" });
+    return res.json(row);
+  });
+});
+
+app.get('/api/appointment/all', (req, res) => {
+  const sql = `SELECT *  
+               FROM tcm_appointments 
+               ORDER BY created_at DESC`;
+  tcmDb.all(sql, [], (err, rows) => {
+    if (err) {
+      console.error('Error fetching appointments:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch appointments' });
+    }
+    res.json(rows || []); // return empty array if none
+  });
+});
+
+// GET /api/appointment/:id/letter - returns generated HTML letter (content-type text/html)
+app.get('/api/appointment/:id/letter', (req, res) => {
+  const id = req.params.id;
+  tcmDb.get("SELECT * FROM tcm_appointments WHERE id = ?", [id], (err, row) => {
+    if (err) {
+      console.error('Error fetching appointment for letter:', err.message);
+      return res.status(500).send('Server error');
+    }
+    if (!row) return res.status(404).send('Not found');
+    const appt = {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      phone: row.phone,
+      startDatetime: row.start_datetime,
+      durationMinutes: row.duration_minutes,
+      notes: row.notes,
+      createdAt: row.created_at
+    };
+    const html = generateAppointmentLetterHtml(appt);
+    res.set('Content-Type', 'text/html');
+    return res.send(html);
+  });
+});
+
+// Utility to generate a modest appointment-letter HTML string
+function generateAppointmentLetterHtml(appt) {
+  // Format date/time
+  let start = new Date(appt.startDatetime);
+  const end = new Date(start.getTime() + (appt.durationMinutes * 60000));
+  const dateOpts = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
+  const timeOpts = { hour: 'numeric', minute: '2-digit', hour12: true };
+  const dateStr = start.toLocaleDateString('en-US', dateOpts);
+  const startTime = start.toLocaleTimeString('en-US', timeOpts);
+  const endTime = end.toLocaleTimeString('en-US', timeOpts);
+
+  // A simple HTML that resembles a calm appointment letter; you can extend styling
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Appointment Confirmation — ${escapeHtml(appt.name)}</title>
+  <style>
+    body{font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial; color:#0a2540; background:#f7fafc; padding:30px;}
+    .card{max-width:820px;margin:20px auto;padding:32px;background:white;border-radius:10px;box-shadow:0 8px 28px rgba(10,37,64,0.06);}
+    h1{margin:0 0 8px;font-size:28px}
+    p.lead{color:#344a5f;margin:0 0 20px}
+    .meta{display:flex;gap:20px;flex-wrap:wrap;margin-top:20px}
+    .meta div{background:#f1f7ff;padding:12px 16px;border-radius:8px}
+    .cta{display:inline-block;margin-top:20px;padding:12px 18px;background:#0b69ff;color:white;border-radius:8px;text-decoration:none}
+    .notes{margin-top:18px;padding:12px;border-left:3px solid #e6eefc;background:#fbfdff;border-radius:6px;color:#1d3557}
+    .muted{color:#6b7a89;font-size:13px;margin-top:12px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>You're scheduled, ${escapeHtml(appt.name)}!</h1>
+    <p class="lead">Thank you — your appointment has been confirmed. A calendar invite will be sent to <strong>${escapeHtml(appt.email)}</strong>.</p>
+
+    <div class="meta">
+      <div>
+        <div style="font-size:13px;color:#6b7a89">When</div>
+        <div style="font-weight:600">${dateStr}<br/>${startTime} — ${endTime}</div>
+      </div>
+
+      <div>
+        <div style="font-size:13px;color:#6b7a89">Duration</div>
+        <div style="font-weight:600">${appt.durationMinutes} minutes</div>
+      </div>
+
+      <div>
+        <div style="font-size:13px;color:#6b7a89">Phone</div>
+        <div style="font-weight:600">${escapeHtml(appt.phone || '—')}</div>
+      </div>
+    </div>
+
+    <div class="notes">
+      <strong>Notes from attendee:</strong>
+      <div style="margin-top:8px">${escapeHtml(appt.notes || 'No additional notes provided.')}</div>
+    </div>
+
+    <a class="cta" href="#">Add to Google Calendar</a>
+
+    <div class="muted">Reference ID: ${appt.id} • Created at ${new Date(appt.createdAt).toLocaleString()}</div>
+  </div>
+</body>
+</html>`;
+}
+
+// quick html-escape
+function escapeHtml(unsafe) {
+  if (unsafe === null || unsafe === undefined) return '';
+  return String(unsafe)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+// ---------------------------
 // Misc - static assets or health check
 // ---------------------------
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -273,6 +442,54 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 // Serve a minimal message at root
 app.get('/', (req, res) => {
   res.send('TCM Quiz server is running.');
+});
+// ---------------------------
+// View stored quiz submissions
+// ---------------------------
+
+// GET /api/tcm/submissions
+// Returns a list of saved quiz submissions (id, email, body_type, created_at)
+app.get('/api/tcm/submissions', (req, res) => {
+  const sql = `SELECT id, email, body_type, created_at FROM tcm_submissions ORDER BY created_at DESC`;
+  tcmDb.all(sql, [], (err, rows) => {
+    if (err) {
+      console.error('Error fetching submissions:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch submissions' });
+    }
+    res.json(rows);
+  });
+});
+
+// GET /api/tcm/submissions/:id
+// Returns a single submission, including answers_json
+app.get('/api/tcm/submissions/:id', (req, res) => {
+  const { id } = req.params;
+  const sql = `SELECT * FROM tcm_submissions WHERE id = ?`;
+  tcmDb.get(sql, [id], (err, row) => {
+    if (err) {
+      console.error('Error fetching submission:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch submission' });
+    }
+    if (!row) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+
+    // Try to parse answers_json back into object
+    let answers = [];
+    try {
+      answers = JSON.parse(row.answers_json);
+    } catch (e) {
+      answers = [];
+    }
+
+    res.json({
+      id: row.id,
+      email: row.email,
+      body_type: row.body_type,
+      created_at: row.created_at,
+      answers
+    });
+  });
 });
 
 // Start server
