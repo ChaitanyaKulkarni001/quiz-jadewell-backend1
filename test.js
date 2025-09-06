@@ -1,36 +1,31 @@
-// test_request.js
-const http = require('http');
+// const sqlite3 = require("sqlite3").verbose();
+// const db = new sqlite3.Database("./tcm.db");
+// db.run(
+//   `INSERT INTO herbal_formulas (user_id, formula_name, description, ingredients_json, created_at) VALUES (?, ?, ?, ?, ?)`,
+//   [1, "Liver Qi Harmonizer", "Supports healthy liver function and reduces stress.", f1Ingredients, now]
+// );
 
-const payload = JSON.stringify({
-  name: "Test User",
-  email: "test@example.com",
-  guests: [],
-  phone: "+911234567890",
-  startDatetime: "2025-09-10T09:30:00.000Z",
-  durationMinutes: 15,
-  notes: "hello",
-  state: "Karnataka"
-});
+// db.run(
+//   `INSERT INTO herbal_formulas (user_id, formula_name, description, ingredients_json, created_at) VALUES (?, ?, ?, ?, ?)`,
+//   [2, "Qi Tonic Formula", "Enhances energy levels and immune resilience.", f2Ingredients, now]
+// );
+// test.js
+// import fetch from "node-fetch"; // if using Node <18, otherwise native fetch works
 
-const options = {
-  hostname: 'localhost',
-  port: 5000,
-  path: '/api/appointment/create',
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(payload)
+const USER_ID = 1; // change to the user ID you want to test
+const API_URL = `http://localhost:5000/api/formulas/user/${USER_ID}`;
+
+async function getFormulas() {
+  try {
+    const response = await fetch(API_URL);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+    const data = await response.json();
+    console.log("All formulas for user:", USER_ID);
+    console.log(JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error("Error fetching formulas:", err);
   }
-};
+}
 
-const req = http.request(options, (res) => {
-  let body = '';
-  res.on('data', chunk => body += chunk);
-  res.on('end', () => {
-    console.log('Status:', res.statusCode);
-    console.log('Body:', body);
-  });
-});
-req.on('error', (e) => console.error('Request error:', e));
-req.write(payload);
-req.end();
+getFormulas();

@@ -42,6 +42,56 @@ tcmDb.serialize(() => {
     }
   );
 
+  // ---------------------------
+// Create Users & Formulas Tables
+// ---------------------------
+
+// Users table
+tcmDb.run(
+  `CREATE TABLE IF NOT EXISTS users (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     name TEXT NOT NULL,
+     email TEXT UNIQUE NOT NULL,
+     password TEXT NOT NULL,
+     created_at TEXT NOT NULL
+   );`,
+  (err) => {
+    if (err) console.error("Failed to create users table:", err.message);
+    else console.log("users table ready");
+  }
+);
+
+// Herbal Formulas table
+tcmDb.run(
+  `CREATE TABLE IF NOT EXISTS herbal_formulas (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     user_id INTEGER NOT NULL,
+     formula_name TEXT NOT NULL,
+     description TEXT,
+     ingredients_json TEXT NOT NULL, -- store array of ingredients
+     created_at TEXT NOT NULL,
+     FOREIGN KEY (user_id) REFERENCES users(id)
+   );`,
+  (err) => {
+    if (err) console.error("Failed to create herbal_formulas table:", err.message);
+    else console.log("herbal_formulas table ready");
+  }
+);
+
+db.run(
+  `CREATE TABLE IF NOT EXISTS patients (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     name TEXT NOT NULL,
+     email TEXT UNIQUE NOT NULL,
+     password_hash TEXT NOT NULL,
+     created_at TEXT NOT NULL
+   );`,
+  (err) => {
+    if (err) console.error("Failed to create patients table:", err.message);
+    else console.log("patients table ready");
+  }
+);
+
   // Create appointments table for appointment flow
   tcmDb.run(
     `CREATE TABLE IF NOT EXISTS tcm_appointments (
@@ -495,3 +545,92 @@ app.get('/api/tcm/submissions/:id', (req, res) => {
 // Start server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+
+
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+
+const JWT_SECRET = "your_secret_key"; // ⚠️ move to .env in production
+
+// ---------------------------
+// Authentication
+// ---------------------------
+
+// POST /api/register
+app.post("/api/register", async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: "name, email, password required" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const createdAt = new Date().toISOString();
+
+    const sql = `INSERT INTO patients (name, email, password_hash, created_at) VALUES (?, ?, ?, ?)`;
+    db.run(sql, [name, email, hashedPassword, createdAt], function (err) {
+      if (err) {
+        if (err.message.includes("UNIQUE constraint")) {
+          return res.status(400).json({ error: "Email already registered" });
+        }
+        console.error("Error inserting patient:", err.message);
+        return res.status(500).json({ error: "Failed to register user" });
+      }
+      res.json({ success: true, userId: this.lastID });
+    });
+  } catch (ex) {
+    console.error("Unhandled error in /api/register:", ex);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/login
+app.post("/api/login", (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: "email, password required" });
+  }
+
+  db.get("SELECT * FROM patients WHERE email = ?", [email], async (err, row) => {
+    if (err) {
+      console.error("Error fetching patient:", err.message);
+      return res.status(500).json({ error: "Server error" });
+    }
+    if (!row) return res.status(400).json({ error: "Invalid credentials" });
+
+    const match = await bcrypt.compare(password, row.password_hash);
+    if (!match) return res.status(400).json({ error: "Invalid credentials" });
+
+    const token = jwt.sign(
+      { id: row.id, email: row.email },
+      JWT_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    res.json({ token });
+  });
+});
+// Middleware
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.sendStatus(403);
+    req.user = user;
+    next();
+  });
+}
+
+// GET /api/dashboard
+app.get("/api/dashboard", authenticateToken, (req, res) => {
+  db.get("SELECT id, name, email, created_at FROM patients WHERE id = ?", [req.user.id], (err, row) => {
+    if (err) {
+      console.error("Error fetching dashboard user:", err.message);
+      return res.status(500).json({ error: "Server error" });
+    }
+    if (!row) return res.status(404).json({ error: "User not found" });
+    res.json({ message: `Welcome back, ${row.name}!`, user: row });
+  });
+});
