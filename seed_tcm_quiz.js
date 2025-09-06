@@ -94,7 +94,7 @@ db.serialize(() => {
     { l: "A", t: "Fall asleep quickly but still feel tired.", img: "https://storage.tally.so/131813ec-87b0-423a-934a-7b1d22557d05/reads-dont-fall-asleep-me-im-not-also-me-above-a-pic-of-ice-t-falling-asleep-sitting-in-a-chair.jpeg", b: "qi_deficient" },
     { l: "B", t: "Light sleep, wake easily from cold.", img: "https://storage.tally.so/82aa3860-d624-4004-b214-c422ecc9004c/9rve1p2fa0m61.webp", b: "yang_deficient" },
     { l: "C", t: "Trouble falling asleep, night sweats or vivid dreams.", img: "https://storage.tally.so/9ed95cf4-2d79-4137-8890-f341b01eb5e8/morning-trying-process-intense-symbolism-appeared-my-dreams.png", b: "yin_deficient" },
-    { l: "D", t: "https://storage.tally.so/9f6ccf93-d7c3-4b07-beaa-6fcdc7e166a3/images.jpeg", img: "https://storage.tally.so/8c7adfa1-8995-4a4b-929b-19d28c05da97/stress.jpg", b: "liver_qi_stagnation" },
+    { l: "D", t: "Trouble falling asleep, night sweats or vivid dreams.", img: "https://storage.tally.so/8c7adfa1-8995-4a4b-929b-19d28c05da97/stress.jpg", b: "liver_qi_stagnation" },
     { l: "E", t: "Night sweats, body heat, toss and turn.", img: "https://storage.tally.so/7d06ad4b-734c-4d8b-874c-d25a1c33a843/7xpg92.jpg", b: "damp_heat" },
     { l: "F", t: "None of the above.", img: "https://storage.tally.so/0eece42f-99f7-4ee1-9438-20e5f152c203/303krn.jpg", b: "balanced" }
   ];
