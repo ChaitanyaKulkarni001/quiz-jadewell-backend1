@@ -1,0 +1,43 @@
+Health & Base
+
+GET /health → { status: "ok" }
+
+GET / → "TCM Quiz server is running."
+
+Quiz
+
+GET /api/quiz → 10 random legacy questions from questions table.
+
+GET /api/tcm/quiz → All quiz questions with options (from tcm_questions + tcm_options).
+
+POST /api/tcm/quiz/submit → Submit answers + email, save submission, return personalized result.
+
+Quiz Submissions
+
+GET /api/tcm/submissions → List all submissions (id, email, body_type, created_at).
+
+GET /api/tcm/submissions/:id → Single submission + answers_json.
+
+Practitioners
+
+GET /api/practitioners → List practitioners with specialties & generated slots.
+
+Appointments
+
+POST /api/appointment/create → Simple appointment with name, email, phone, etc.
+
+POST /api/appointment/create-full → Appointment with practitioner, payment, state, etc.
+
+GET /api/appointment/:id → Single appointment by id.
+
+GET /api/appointment/all → All appointments.
+
+GET /api/appointment/:id/letter → Appointment confirmation HTML letter.
+
+Authentication & Users
+
+POST /api/register → Register a patient.
+
+POST /api/login → Login, returns JWT.
+
+GET /api/dashboard → Protected route, requires JWT Bearer token.
