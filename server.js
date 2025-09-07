@@ -130,49 +130,100 @@ app.get('/api/quiz', (req, res) => {
 });
 
 // 2. Submit answers and calculate result (legacy)
-app.post('/api/quiz/submit', (req, res) => {
-  const answers = req.body.answers; // [{id, answer:true/false}, ...]
+app.post('/api/tcm/quiz/submit', (req, res) => {
+  try {
+    const { answers, email } = req.body;
 
-  if (!Array.isArray(answers)) {
-    return res.status(400).json({ error: "answers (array) required" });
-  }
+    if (!Array.isArray(answers) || answers.length === 0) {
+      return res.status(400).json({ error: "answers (non-empty array) required" });
+    }
+    if (!email || typeof email !== "string") {
+      return res.status(400).json({ error: "email is required" });
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: "invalid email format" });
+    }
 
-  // Tally scores
-  let scores = { yin: 0, yang: 0, qi: 0, blood: 0 };
-
-  // We'll collect DB calls and wait for them to finish using Promise wrapper
-  const promises = answers.map(ans => {
-    return new Promise((resolve) => {
-      if (!ans.answer) return resolve();
-      db.get("SELECT type FROM questions WHERE id = ?", [ans.id], (err, row) => {
-        if (err) {
-          console.error('Error reading question type:', err);
-        } else if (row && row.type) {
-          if (scores[row.type] !== undefined) scores[row.type]++;
-        }
-        resolve();
-      });
-    });
-  });
-
-  Promise.all(promises).then(() => {
-    let bestType = Object.keys(scores).reduce((a, b) => scores[a] > scores[b] ? a : b);
-    db.get("SELECT * FROM results WHERE type = ?", [bestType], (err, row) => {
-      if (err) {
-        console.error('Error fetching results row:', err.message);
-        return res.status(500).json({ error: err.message });
+    const bodyTypeCounts = {};
+    answers.forEach(answer => {
+      if (answer && answer.body_type) {
+        bodyTypeCounts[answer.body_type] = (bodyTypeCounts[answer.body_type] || 0) + 1;
       }
-      res.json({
-        type: bestType,
-        title: row?.title || null,
-        description: row?.description || null
-      });
     });
-  }).catch(e => {
-    console.error('Error processing legacy quiz submit:', e);
-    res.status(500).json({ error: 'Internal server error' });
-  });
+
+    const dominantBodyType = Object.keys(bodyTypeCounts).length
+      ? Object.keys(bodyTypeCounts).reduce((a, b) =>
+          bodyTypeCounts[a] > bodyTypeCounts[b] ? a : b
+        )
+      : "unsure";
+
+    const bodyTypeMapping = {
+      yin: "yin_deficient",
+      yang: "yang_deficient",
+      qi: "qi_deficient",
+      blood: "blood_deficient",
+      unsure: "balanced"
+    };
+
+    const mappedBodyType = bodyTypeMapping[dominantBodyType] || dominantBodyType;
+
+    tcmDb.get(
+      "SELECT * FROM tcm_results WHERE body_type = ?",
+      [mappedBodyType],
+      (err, row) => {
+        if (err) {
+          console.error('Error fetching tcm_results row:', err.message);
+          return res.status(500).json({ error: err.message });
+        }
+
+        const parseMaybeJson = (val) => {
+          try {
+            const parsed = JSON.parse(val);
+            if (Array.isArray(parsed)) return parsed;
+          } catch (e) {}
+          return [];
+        };
+
+        const resultPayload = {
+          body_type: mappedBodyType,
+          title: (row && row.title) ? row.title : "Personalized Result",
+          description: (row && row.description) ? row.description : "We created a tailored result for you.",
+          recommendations: row ? parseMaybeJson(row.recommendations) : [],
+          foods_to_eat: row ? parseMaybeJson(row.foods_to_eat) : [],
+          foods_to_avoid: row ? parseMaybeJson(row.foods_to_avoid) : [],
+          lifestyle_tips: row ? parseMaybeJson(row.lifestyle_tips) : [],
+          // body_type_counts
+        };
+
+        const answersJson = JSON.stringify(answers);
+        const createdAt = new Date().toISOString();
+        const insertSql = `INSERT INTO tcm_submissions (email, answers_json, body_type, created_at) VALUES (?, ?, ?, ?)`;
+
+        tcmDb.run(insertSql, [email, answersJson, mappedBodyType, createdAt], function(insertErr) {
+          if (insertErr) {
+            console.error('Failed to insert submission:', insertErr.message);
+            resultPayload.saved = false;
+            resultPayload.savedEmail = null;
+            return res.status(500).json({ error: "Failed to save submission" });
+          }
+
+          resultPayload.saved = true;
+          resultPayload.savedEmail = email;
+          resultPayload.submissionId = this.lastID;
+
+          return res.json(resultPayload);
+        });
+      }
+    );
+  } catch (ex) {
+    console.error('Unhandled error in /api/tcm/quiz/submit:', ex);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
+
+
+
 
 // ---------------------------
 // TCM Quiz API endpoints (unchanged)
@@ -184,14 +235,12 @@ app.get('/api/tcm/quiz', (req, res) => {
     SELECT 
       q.id,
       q.question_text,
-      q.question_description,
       q.question_order,
       json_group_array(
         json_object(
           'id', o.id,
           'letter', o.option_letter,
           'text', o.option_text,
-          'image_url', o.option_image_url,
           'body_type', o.body_type
         )
       ) as options
@@ -268,14 +317,13 @@ app.post('/api/tcm/quiz/submit', (req, res) => {
         }
 
         const parseMaybeJson = (val) => {
-          if (!val && val !== "") return [];
-          if (Array.isArray(val)) return val;
-          try {
-            const parsed = JSON.parse(val);
-            if (Array.isArray(parsed)) return parsed;
-          } catch (e) {}
-          return String(val).split(',').map(s => s.trim()).filter(Boolean);
-        };
+  try {
+    const parsed = JSON.parse(val);
+    if (Array.isArray(parsed)) return parsed;
+  } catch (e) {}
+  return [];
+};
+
 
         const resultPayload = {
           body_type: dominantBodyType,
@@ -285,7 +333,7 @@ app.post('/api/tcm/quiz/submit', (req, res) => {
           foods_to_eat: row ? parseMaybeJson(row.foods_to_eat) : [],
           foods_to_avoid: row ? parseMaybeJson(row.foods_to_avoid) : [],
           lifestyle_tips: row ? parseMaybeJson(row.lifestyle_tips) : [],
-          body_type_counts: bodyTypeCounts
+          // body_type_counts: bodyTypeCounts
         };
 
         const answersJson = JSON.stringify(answers);
@@ -303,6 +351,7 @@ app.post('/api/tcm/quiz/submit', (req, res) => {
           resultPayload.saved = true;
           resultPayload.savedEmail = email;
           resultPayload.submissionId = this.lastID;
+          // resultPayload.body_type_counts = bodyTypeCounts;
           return res.json(resultPayload);
         });
       }
