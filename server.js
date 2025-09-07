@@ -23,96 +23,9 @@ const tcmDb = new sqlite3.Database('./tcm_quiz.db', sqlite3.OPEN_READWRITE | sql
 app.use(cors());
 app.use(bodyParser.json({ limit: '1mb' }));
 
-// Ensure submissions table exists for TCM quiz
-tcmDb.serialize(() => {
-  tcmDb.run(
-    `CREATE TABLE IF NOT EXISTS tcm_submissions (
-       id INTEGER PRIMARY KEY AUTOINCREMENT,
-       email TEXT NOT NULL,
-       answers_json TEXT NOT NULL,
-       body_type TEXT,
-       created_at TEXT NOT NULL
-     );`,
-    (err) => {
-      if (err) {
-        console.error('Failed to create tcm_submissions table:', err.message);
-      } else {
-        console.log('tcm_submissions table ready');
-      }
-    }
-  );
-
-  // ---------------------------
-// Create Users & Formulas Tables
-// ---------------------------
-
-// Users table
-tcmDb.run(
-  `CREATE TABLE IF NOT EXISTS users (
-     id INTEGER PRIMARY KEY AUTOINCREMENT,
-     name TEXT NOT NULL,
-     email TEXT UNIQUE NOT NULL,
-     password TEXT NOT NULL,
-     created_at TEXT NOT NULL
-   );`,
-  (err) => {
-    if (err) console.error("Failed to create users table:", err.message);
-    else console.log("users table ready");
-  }
-);
-
-// Herbal Formulas table
-tcmDb.run(
-  `CREATE TABLE IF NOT EXISTS herbal_formulas (
-     id INTEGER PRIMARY KEY AUTOINCREMENT,
-     user_id INTEGER NOT NULL,
-     formula_name TEXT NOT NULL,
-     description TEXT,
-     ingredients_json TEXT NOT NULL, -- store array of ingredients
-     created_at TEXT NOT NULL,
-     FOREIGN KEY (user_id) REFERENCES users(id)
-   );`,
-  (err) => {
-    if (err) console.error("Failed to create herbal_formulas table:", err.message);
-    else console.log("herbal_formulas table ready");
-  }
-);
-
-db.run(
-  `CREATE TABLE IF NOT EXISTS patients (
-     id INTEGER PRIMARY KEY AUTOINCREMENT,
-     name TEXT NOT NULL,
-     email TEXT UNIQUE NOT NULL,
-     password_hash TEXT NOT NULL,
-     created_at TEXT NOT NULL
-   );`,
-  (err) => {
-    if (err) console.error("Failed to create patients table:", err.message);
-    else console.log("patients table ready");
-  }
-);
-
-  // Create appointments table for appointment flow
-  tcmDb.run(
-    `CREATE TABLE IF NOT EXISTS tcm_appointments (
-       id INTEGER PRIMARY KEY AUTOINCREMENT,
-       name TEXT NOT NULL,
-       email TEXT NOT NULL,
-       phone TEXT,
-       start_datetime TEXT NOT NULL,  -- ISO string
-       duration_minutes INTEGER NOT NULL,
-       notes TEXT,
-       created_at TEXT NOT NULL
-     );`,
-    (err) => {
-      if (err) {
-        console.error('Failed to create tcm_appointments table:', err.message);
-      } else {
-        console.log('tcm_appointments table ready');
-      }
-    }
-  );
-});
+// Database tables are now managed by db_manager.js
+// Tables should be created using: node db_manager.js reset
+console.log('Database connection established. Tables should be created using db_manager.js');
 
 // ---------------------------
 // Existing quiz routes (unchanged)
@@ -405,6 +318,139 @@ app.post('/api/appointment/create', (req, res) => {
     console.error('Unhandled error in /api/appointment/create:', ex);
     return res.status(500).json({ error: "Internal server error" });
   }
+});
+
+// POST /api/appointment/create-full
+// body: { state, age, email, name, authMethod, practitioner, selectedDate, selectedTime, paymentStatus, paymentId, amount }
+app.post('/api/appointment/create-full', (req, res) => {
+  try {
+    const { 
+      state, age, email, name, authMethod, practitioner, 
+      selectedDate, selectedTime, paymentStatus, paymentId, amount 
+    } = req.body;
+
+    if (!email || !practitioner || !selectedDate || !selectedTime) {
+      return res.status(400).json({ error: "email, practitioner, selectedDate, selectedTime required" });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: "invalid email format" });
+    }
+
+    // Validate date/time formats and construct a Date safely
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/; // YYYY-MM-DD
+    const timeRegex = /^\d{2}:\d{2}$/; // HH:mm 24h
+    if (!dateRegex.test(selectedDate)) {
+      return res.status(400).json({ error: "selectedDate must be YYYY-MM-DD" });
+    }
+    if (!timeRegex.test(selectedTime)) {
+      return res.status(400).json({ error: "selectedTime must be HH:mm (24h)" });
+    }
+
+    // Create datetime from selectedDate and selectedTime in local time
+    const [hourStr, minuteStr] = selectedTime.split(':');
+    const dt = new Date(selectedDate);
+    dt.setHours(Number(hourStr), Number(minuteStr), 0, 0);
+    if (isNaN(dt.getTime())) {
+      return res.status(400).json({ error: "Invalid selectedDate/selectedTime combination" });
+    }
+    const appointmentDateTime = dt;
+    const createdAt = new Date().toISOString();
+
+    const insertSql = `INSERT INTO tcm_appointments (
+      name, email, state, age, auth_method, practitioner_id, practitioner_name,
+      start_datetime, duration_minutes, payment_status, payment_id, amount, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+    tcmDb.run(insertSql, [
+      name || '', email, state || '', age || null, authMethod || 'email',
+      practitioner.id, practitioner.name, appointmentDateTime.toISOString(),
+      30, paymentStatus || 'completed', paymentId || '', amount || 150.00, createdAt
+    ], function(err) {
+      if (err) {
+        console.error('Failed to insert full appointment:', err.message);
+        return res.status(500).json({ error: 'Failed to save appointment' });
+      }
+
+      const appointmentId = this.lastID;
+      const appointment = {
+        id: appointmentId,
+        name: name || '',
+        email,
+        state: state || '',
+        age: age || null,
+        authMethod: authMethod || 'email',
+        practitioner,
+        startDatetime: appointmentDateTime.toISOString(),
+        durationMinutes: 30,
+        paymentStatus: paymentStatus || 'completed',
+        paymentId: paymentId || '',
+        amount: amount || 150.00,
+        createdAt
+      };
+
+      return res.json({ success: true, appointmentId, appointment });
+    });
+  } catch (ex) {
+    console.error('Unhandled error in /api/appointment/create-full:', ex);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/practitioners
+app.get('/api/practitioners', (req, res) => {
+  tcmDb.all("SELECT * FROM practitioners ORDER BY rating DESC", [], (err, rows) => {
+    if (err) {
+      console.error('Error fetching practitioners:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch practitioners' });
+    }
+    
+    // Parse specialties JSON for each practitioner
+    const practitioners = (rows || []).map(practitioner => {
+      try {
+        const specialties = JSON.parse(practitioner.specialties);
+        // Generate simple upcoming slots for the next 3 days at fixed times
+        const generateSlots = () => {
+          const times = ["10:00", "11:00", "14:00", "16:00"]; // 24h HH:mm
+          const daysAhead = 3;
+          const slots = [];
+          for (let d = 0; d < daysAhead; d++) {
+            const dateObj = new Date();
+            dateObj.setDate(dateObj.getDate() + d);
+            const yyyy = dateObj.getFullYear();
+            const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+            const dd = String(dateObj.getDate()).padStart(2, '0');
+            const dateStr = `${yyyy}-${mm}-${dd}`;
+            times.forEach(t => {
+              // Build human text, e.g., "Tue 10:00 AM"
+              const [h, m] = t.split(":");
+              const local = new Date(`${dateStr}T${t}:00`);
+              const weekday = local.toLocaleDateString('en-US', { weekday: 'short' });
+              const timeText = local.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+              slots.push({ date: dateStr, time: t, text: `${weekday} ${timeText}` });
+            });
+          }
+          return slots;
+        };
+        return {
+          ...practitioner,
+          specialties: specialties,
+          slots: generateSlots()
+        };
+      } catch (e) {
+        console.warn('Failed to parse specialties for practitioner:', practitioner.name);
+        const generateSlots = () => [];
+        return {
+          ...practitioner,
+          specialties: [],
+          slots: generateSlots()
+        };
+      }
+    });
+    
+    res.json(practitioners);
+  });
 });
 
 // GET /api/appointment/:id - returns JSON appointment
